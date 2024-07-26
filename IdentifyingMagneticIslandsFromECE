@@ -4,7 +4,7 @@ start_ch = 13
 stop_ch = 40 + 1 #one above actual channel
 ece_ch_to_look = range(start_ch,stop_ch) #add the ece channels to pull from OMFIT
 ece_ch_indices = range(start_ch-1,stop_ch-1)
-t_vec =  [3305, 3312] #[3042, 3048] [3238, 3241] [3228, 3235] [3305, 3312]
+t_vec =  [3042, 3048] #[3042, 3048] [3238, 3241] [3228, 3235] [3305, 3312]
 
 t1 = t_vec[0]/1e3 #ms -> s
 t2 = t_vec[-1]/1e3 #ms -> s
@@ -69,6 +69,7 @@ for freqind in range(len(mirnov_freqs_found)):
     Rs = 20                                    #Stopband Ripple (dB)
     n, Ws = scipy.signal.cheb2ord(Wp, Ws, Rp, Rs)  #Filter order
     sos = scipy.signal.cheby2(N=n, rs=Rs, Wn=Ws,btype='bandpass', output='sos')   #Create filter
+
     for chn in range(len(x)):
         xx = x[chn]
         x1 = scipy.signal.sosfiltfilt(sos, xx) #Filter Signal
@@ -78,44 +79,47 @@ for freqind in range(len(mirnov_freqs_found)):
     phase_time = angle(signal_analytic)
 
     p = phase_time
-    dt = abs(t_vec[0]/1e3-t_vec[-1]/1e3)/p.shape[1]
-    T = 1/(f0)
-    ndt = T/dt
+    dt = abs(t_vec[0]/1e3-t_vec[-1]/1e3)/p.shape[1] #change in time between elements in phase time
+    T = 1/(f0) #period of the mhd mode
+    ndt = T/dt #number of phase time elements in one period
     nperiods = 10   #number of periods to use for correlate
-    maxlags = nperiods*math.ceil(ndt)
+    maxlags = nperiods*math.ceil(ndt) #number of elements needed for 10 periods
     peaks = array([[],[]])
-    
 
     for jj in range(p.shape[0]-1): #for each pair of channels
         a = p[jj]
         b = p[jj+1]
+        #pair of channels correlated and array sliced to the size of 2maxlags
+        #unsure why r is so large
         r = scipy.signal.correlate(a, b)[len(a) - 1 - maxlags:len(a) + maxlags]
         lags = np.arange(-maxlags, maxlags + 1)
-
-        pks, properties = scipy.signal.find_peaks(r) #find peaks in correlation
+        #Most peaks in top of this seem to be the positive amplitude value but some of the negative values
+        #are also identified as peaks
+        pks, properties = scipy.signal.find_peaks(r, distance=19) #find peaks in correlation
         phs = lags[pks]/ndt
         chn = jj*ones(len(pks))
         newpeaks = stack((phs, chn))
         peaks = concatenate((peaks,newpeaks),axis=1)
     chnnum_list = [int(val) for val in unique(peaks[1,:])]
-
+    
     #Find best guess for island location
     avgpnt = zeros((1,len(chnnum_list)))
-    for chnnum in chnnum_list:
-        chn_i = where(peaks[1,:] == chnnum)[0]
-        thesepnts = np.mod(peaks[0,chn_i], 1)
-        avgpnt[0,chnnum] = mean(thesepnts)
-
-    avg_chn_i = where(abs(.5-avgpnt)<0.2)[1]
+    for chnnum in chnnum_list:    #iterate through all of the channel indices
+        chn_i = where(peaks[1,:] == chnnum)[0] #identify indices for that channel in peaks array
+        thesepnts = np.mod(peaks[0,chn_i], 1) #decimal component of each point
+        avgpnt[0,chnnum] = mean(thesepnts) #avg phase lag?
+    
+    avg_chn_i = where(abs(.5-avgpnt)<0.2)[1] #indices of channels with a phase lag of approx .5
     stdpnt = zeros((1,len(avg_chn_i)))
     std_chn_all =[]
     chncount = 0
     stdcount = 0
+    
     for chnnum in avg_chn_i:
         chn_i = where(peaks[1,:] == chnnum)[0]
         thesepnts = np.mod(peaks[0,chn_i], 1)
-        stdpnt[0,chncount] = std(thesepnts)
-        if stdpnt[0,chncount] < 0.1:
+        stdpnt[0,chncount] = std(thesepnts) #standard deviation of phase lag?
+        if stdpnt[0,chncount] < 0.1:        #if standard deviation is small   
             std_chn_all.append(chncount)
             stdcount = stdcount + 1
         chncount = chncount + 1
@@ -137,3 +141,4 @@ for freqind in range(len(mirnov_freqs_found)):
     std_ind_all = std_ind_allCell[freqind]
     figure()
     scatter(peaks[1,std_ind_all]+ece_ch_to_look[0]+1-0.5,peaks[0,std_ind_all]%1*2-1)
+
