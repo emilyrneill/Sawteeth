@@ -1,0 +1,144 @@
+for time_center in range(3036, 3080, 4):
+    shot = 192244  #add shot number to focus on
+    
+    start_ch = 13
+    stop_ch = 40 + 1 #one above actual channel
+    ece_ch_to_look = range(start_ch,stop_ch) #add the ece channels to pull from OMFIT
+    ece_ch_indices = range(start_ch-1,stop_ch-1)
+    t_vec =  [time_center - 2, time_center + 2]
+    print(t_vec)    
+
+    t1 = t_vec[0]/1e3 #ms -> s
+    t2 = t_vec[-1]/1e3 #ms -> s
+    t_to_check = mean(t_vec)
+    max_freq = 40e3 #Hz
+    
+    t = OMFIT['SCOPE']['SCOPE_DATA']['DIII-D']['192244']['ecevs25_0,0,6,None'].time.data.copy()
+    start_t = abs(t - t1).argmin()
+    stop_t = abs(t - t2).argmin() + 1
+    
+    #GET DATA FROM MIRNOV COIL
+    tmirnov = OMFIT['SCOPE']['SCOPE_DATA']['DIII-D']['192244']['mpi66m307d,0,6,None'].time.data.copy()
+    start_tm = abs(tmirnov - t1).argmin()
+    stop_tm = abs(tmirnov - t2).argmin() + 1
+    mirnov_vec = OMFIT['SCOPE']['SCOPE_DATA']['DIII-D']['192244']['mpi66m307d,0,6,None'].data[start_tm:stop_tm].copy()
+    mirnov_vec_t = tmirnov[start_tm:stop_tm]
+    Bor = interp(t[start_t:stop_t],mirnov_vec_t, mirnov_vec)
+    
+    #GET DATA
+    ece_ch_data = zeros((40, OMFIT['SCOPE']['SCOPE_DATA']['DIII-D']['192244']['ecevs25_0,0,6,None'].data[start_t:stop_t].size))
+    for chn_num in ece_ch_to_look:
+        ece_ch_data[chn_num-1] = OMFIT['SCOPE']['SCOPE_DATA']['DIII-D']['192244']['ecevs'+str(chn_num)+'_0,0,6,None'].data[start_t:stop_t].copy()
+    
+    peaksCell = []
+    std_ind_allCell = []
+    std_indCell = []
+    
+    ##FFT OF BOR(T) TO FIND MODES
+    BorFFT = scipy.fft.fft(Bor)
+    L = ece_ch_data[0].data.shape[0]     #Length of signal
+    Fs = L/(t2 - t1)         #Sampling frequency
+    P2 = abs(BorFFT/L)
+    P1 = P2[0:int(np.floor(L/2))+1]
+    P1[1:-1] = 2*P1[1:-1]
+    f = Fs * np.arange(0,L/2+1) / L
+    peakprom = 1
+    pks, properties = scipy.signal.find_peaks(P1, prominence=1, distance= 1000/diff(f)[0])
+    Borfreqs = f[pks]
+    mirnov_freqs_found = Borfreqs/1e3
+    print(mirnov_freqs_found)
+
+    ##FIND ECE STFT
+    wlen = 1024/2        #window length (recommended to be power of 2)
+    hop = wlen/16        #hop size (recommended to be power of 2)
+    if wlen > ece_ch_data[0].data.shape[0]:
+        wlen = ece_ch_data[0].data.shape[0]
+        hop = wlen/4
+    nfft = wlen*4        #number of fft points (recommended to be power of 2)
+    
+    #For each frequency, correlation between channels
+    for freqind in range(len(mirnov_freqs_found)):
+        x = ece_ch_data[ece_ch_indices]
+        x2 = zeros(x.shape)
+        N = x.shape[1]
+        f0 = Borfreqs[freqind]    #Hz centered frequency
+        df = 1*1e3 #included freq range
+        sf = 1.001*1e3   #Hz stopband
+        Fs = N/abs(t_vec[0]/1e3-t_vec[-1]/1e3)     #Sampling Frequency (Hz)
+        Fn = Fs/2                                  #Nyquist Frequency (Hz)
+        Wp = array([f0-df, f0+df])/Fn              #Passband Frequency (Normalised)
+        Ws = array([f0-sf, f0+sf])/Fn              #Stopband Frequency (Normalised)
+        Rp = 1                                     #Passband Ripple (dB)
+        Rs = 20                                    #Stopband Ripple (dB)
+        n, Ws = scipy.signal.cheb2ord(Wp, Ws, Rp, Rs)  #Filter order
+        sos = scipy.signal.cheby2(N=n, rs=Rs, Wn=Ws,btype='bandpass', output='sos')   #Create filter
+        for chn in range(len(x)):
+            xx = x[chn]
+            x1 = scipy.signal.sosfiltfilt(sos, xx) #Filter Signal
+            x2[chn] = x1
+        signal_analytic = scipy.signal.hilbert(x2)
+        mag_time = abs(signal_analytic)
+        phase_time = angle(signal_analytic)
+    
+        p = phase_time
+        dt = abs(t_vec[0]/1e3-t_vec[-1]/1e3)/p.shape[1]
+        T = 1/(f0)
+        ndt = T/dt
+        nperiods = 10   #number of periods to use for correlate
+        maxlags = nperiods*math.ceil(ndt)
+        peaks = array([[],[]])
+        
+        for jj in range(p.shape[0]-1): #for each pair of channels
+            a = p[jj]
+            b = p[jj+1]
+            r = scipy.signal.correlate(a, b)[len(a) - 1 - maxlags:len(a) + maxlags]
+            lags = np.arange(-maxlags, maxlags + 1)
+            pks, properties = scipy.signal.find_peaks(r) #find peaks in correlation
+            phs = lags[pks]/ndt
+            chn = jj*ones(len(pks))
+            newpeaks = stack((phs, chn))
+            peaks = concatenate((peaks,newpeaks),axis=1)
+        chnnum_list = [int(val) for val in unique(peaks[1,:])]
+         
+        #Find best guess for island location
+        avgpnt = zeros((1,len(chnnum_list)))
+        for chnnum in chnnum_list:
+            chn_i = where(peaks[1,:] == chnnum)[0]
+            thesepnts = np.mod(peaks[0,chn_i], 1)
+            avgpnt[0,chnnum] = mean(thesepnts)
+       
+        avg_chn_i = where(abs(.5-avgpnt)<0.25)[1] #THIS HAS BEEN CHANGED
+        stdpnt = zeros((1,len(avg_chn_i)))
+        std_chn_all =[]
+        chncount = 0
+        stdcount = 0
+        for chnnum in avg_chn_i:
+            chn_i = where(peaks[1,:] == chnnum)[0]
+            thesepnts = np.mod(peaks[0,chn_i], 1)
+            stdpnt[0,chncount] = std(thesepnts)
+            if stdpnt[0,chncount] < 0.1:
+                std_chn_all.append(chncount)
+                stdcount = stdcount + 1
+            chncount = chncount + 1
+    
+        std_chn = stdpnt.argmin()
+        std_ind = where(peaks[1,:] == avg_chn_i[std_chn])
+        std_ind_all = []
+        for std_i in range(stdcount):
+            new_std_ind = where(peaks[1,:] == avg_chn_i[std_chn_all[std_i]])
+            std_ind_all = std_ind_all + new_std_ind[0].tolist()
+        peaksCell.append(peaks)
+        std_ind_allCell.append(std_ind_all)
+        std_indCell.append(std_ind)
+
+    #print (peaksCell)
+    #Plot Results
+    colors = ["b", "r", "g", "c", "y"]
+    for freqind in range(len(mirnov_freqs_found)):
+        peaks = peaksCell[freqind]
+        std_ind = std_indCell[freqind]
+        std_ind_all = std_ind_allCell[freqind]
+        island_locations = unique(peaks[1,std_ind_all]+ece_ch_to_look[0]+1-0.5)
+        for loc in island_locations:
+            #errorbar(time_center, loc, xerr=2, fmt='o', ecolor=colors[freqind], color=colors[freqind])
+            scatter(time_center, loc, color=colors[freqind],s=36)
